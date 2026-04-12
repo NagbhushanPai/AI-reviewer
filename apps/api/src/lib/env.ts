@@ -1,10 +1,7 @@
-import dotenvSafe from "dotenv-safe";
+import { config as dotenvConfig } from "dotenv";
 import { z } from "zod";
 
-dotenvSafe.config({
-  allowEmptyValues: true,
-  example: "../../.env.example"
-});
+dotenvConfig({ path: "../../.env" });
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
