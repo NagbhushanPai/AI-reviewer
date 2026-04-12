@@ -1,0 +1,12 @@
+{
+  "name": "ai-code-review",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm -r --filter \"./apps/**\" dev",
+    "build": "pnpm --filter @ai-review/types build && pnpm --filter @ai-review/utils build && pnpm --filter @ai-review/api build && pnpm --filter @ai-review/web build",
+    "lint": "pnpm -r lint",
+    "format": "prettier . --write"
+  }
+}

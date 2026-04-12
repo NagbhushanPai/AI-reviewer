@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Repo {
+  id    String @id @default(uuid())
+  name  String
+  files File[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model File {
+  id      String @id @default(uuid())
+  path    String
+  content String
+  repoId  String
+  repo    Repo   @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Embedding {
+  id      String   @id @default(uuid())
+  vector  Unsupported("vector")
+  fileId  String
+  file    File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

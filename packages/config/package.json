@@ -1,0 +1,10 @@
+{
+  "name": "@ai-review/config",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./eslint": "./eslint.config.mjs",
+    "./prettier": "./prettier.config.cjs",
+    "./tsconfig": "./tsconfig.base.json"
+  }
+}
