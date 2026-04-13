@@ -8,5 +8,9 @@
     "build": "pnpm --filter @ai-review/types build && pnpm --filter @ai-review/utils build && pnpm --filter @ai-review/api build && pnpm --filter @ai-review/web build",
     "lint": "pnpm -r lint",
     "format": "prettier . --write"
+  },
+  "devDependencies": {
+    "globals": "^17.5.0",
+    "typescript-eslint": "^8.58.1"
   }
 }

@@ -1,12 +1,11 @@
-export type ReviewSeverity = "info" | "warning" | "error";
+export type ReviewSeverity = "low" | "medium" | "high";
 
-export interface ReviewFinding {
-  id: string;
-  message: string;
+export interface ReviewIssue {
+  issue: string;
   severity: ReviewSeverity;
-  line?: number;
-  suggestion?: string;
-  source: "heuristic" | "llm";
+  suggestion: string;
+  line: number | null;
+  source: "ast" | "llm";
 }
 
 export interface ReviewRequest {
@@ -14,11 +13,13 @@ export interface ReviewRequest {
   language?: string;
   context?: string;
   repository?: string;
+  sourcePath?: string;
 }
 
 export interface ReviewResponse {
-  summary: string;
-  findings: ReviewFinding[];
+  risk: number;
+  verdict: "Needs changes" | "Review suggested" | "Looks good";
+  issues: ReviewIssue[];
 }
 
 export interface SocketServerEvents {
@@ -26,6 +27,8 @@ export interface SocketServerEvents {
 }
 
 export interface SocketClientEvents {
+  "review:partial": (payload: { data: string }) => void;
+  "review:done": () => void;
   "review:result": (payload: ReviewResponse) => void;
   "review:error": (payload: { message: string }) => void;
 }

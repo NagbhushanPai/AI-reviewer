@@ -1,115 +1,195 @@
-import { randomUUID } from "node:crypto";
-import type { ReviewFinding, ReviewRequest, ReviewResponse } from "@ai-review/types";
-import { buildReviewContext } from "../ai/ai.service.js";
-import { callReviewModel } from "../../lib/openai.js";
-import { readCachedReview, writeCachedReview } from "../../services/review-cache.service.js";
+import { createHash } from "node:crypto";
+import type { FastifyBaseLogger } from "fastify";
+import { parsePatch } from "diff";
+import type { ReviewIssue, ReviewRequest, ReviewResponse, ReviewSeverity } from "@ai-review/types";
+import { redis } from "../../lib/redis.js";
+import { createReviewCompletion, createReviewCompletionStream } from "../../lib/openai.js";
+import { runAstRules } from "../../analysis/ast-rules.js";
 
-function findLine(code: string, matcher: RegExp): number | undefined {
-  const lines = code.split(/\r?\n/);
-  const index = lines.findIndex((line) => matcher.test(line));
-  return index >= 0 ? index + 1 : undefined;
+type ReviewOptions = {
+  source?: string;
+  logger?: FastifyBaseLogger;
+  onChunk?: (chunk: string) => void;
+};
+
+const PARSE_FALLBACK: ReviewIssue[] = [
+  {
+    issue: "Failed to parse model response",
+    severity: "low",
+    suggestion: "Try the review again.",
+    line: null,
+    source: "llm"
+  }
+];
+
+function normalizeSeverity(value: unknown): ReviewSeverity {
+  if (value === "high" || value === "medium" || value === "low") {
+    return value;
+  }
+
+  return "low";
 }
 
-function heuristicReview(code: string): ReviewFinding[] {
-  const findings: ReviewFinding[] = [];
+function parseIssuesFromModel(raw: string): ReviewIssue[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const asArray = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as { issues?: unknown })?.issues)
+        ? ((parsed as { issues: unknown[] }).issues ?? [])
+        : null;
 
-  if (/\bany\b/.test(code)) {
-    findings.push({
-      id: randomUUID(),
-      message: "Avoid `any` because it removes the safety benefits of TypeScript.",
-      severity: "warning",
-      line: findLine(code, /\bany\b/),
-      suggestion: "Replace it with a narrower type or a generic.",
-      source: "heuristic"
+    if (!asArray) {
+      return PARSE_FALLBACK;
+    }
+
+    return asArray.map((item) => {
+      const row = item as {
+        issue?: unknown;
+        severity?: unknown;
+        suggestion?: unknown;
+        line?: unknown;
+      };
+
+      return {
+        issue: typeof row.issue === "string" ? row.issue : "Unspecified issue",
+        severity: normalizeSeverity(row.severity),
+        suggestion: typeof row.suggestion === "string" ? row.suggestion : "Provide a concrete fix.",
+        line: typeof row.line === "number" ? row.line : null,
+        source: "llm"
+      };
     });
+  } catch {
+    return PARSE_FALLBACK;
   }
-
-  if (/console\.log\(/.test(code)) {
-    findings.push({
-      id: randomUUID(),
-      message: "Console logging should not ship in production paths.",
-      severity: "info",
-      line: findLine(code, /console\.log\(/),
-      suggestion: "Use structured logging behind a logger abstraction.",
-      source: "heuristic"
-    });
-  }
-
-  if (/TODO|FIXME/.test(code)) {
-    findings.push({
-      id: randomUUID(),
-      message: "There is a pending TODO or FIXME in the code.",
-      severity: "info",
-      line: findLine(code, /TODO|FIXME/),
-      suggestion: "Resolve the note or track it as an explicit follow-up task.",
-      source: "heuristic"
-    });
-  }
-
-  if (/eval\(/.test(code)) {
-    findings.push({
-      id: randomUUID(),
-      message: "Avoid `eval` because it is unsafe and hard to reason about.",
-      severity: "error",
-      line: findLine(code, /eval\(/),
-      suggestion: "Replace it with explicit parsing or a safe interpreter.",
-      source: "heuristic"
-    });
-  }
-
-  return findings;
 }
 
-function mergeFindings(base: ReviewFinding[], additional: ReviewFinding[]): ReviewFinding[] {
+function dedupeIssues(issues: ReviewIssue[]): ReviewIssue[] {
   const seen = new Set<string>();
-  const merged: ReviewFinding[] = [];
+  const merged: ReviewIssue[] = [];
 
-  for (const finding of [...base, ...additional]) {
-    const key = `${finding.line ?? 0}:${finding.message}`;
-
+  for (const issue of issues) {
+    const key = `${issue.line ?? 0}:${issue.issue}`;
     if (!seen.has(key)) {
       seen.add(key);
-      merged.push(finding);
+      merged.push(issue);
     }
   }
 
   return merged;
 }
 
-export async function reviewCode(request: ReviewRequest): Promise<ReviewResponse> {
-  const cachedReview = await readCachedReview(request.code, request.language, request.context);
-  if (cachedReview) {
-    return cachedReview;
+function extractAddedLinesWithContext(rawDiff: string): string {
+  const files = parsePatch(rawDiff);
+  const slices: string[] = [];
+
+  for (const file of files) {
+    const filename = file.newFileName ?? file.oldFileName ?? "unknown";
+
+    for (const hunk of file.hunks ?? []) {
+      for (let index = 0; index < hunk.lines.length; index += 1) {
+        const line = hunk.lines[index];
+        if (!line.startsWith("+") || line.startsWith("+++")) {
+          continue;
+        }
+
+        const start = Math.max(0, index - 2);
+        const end = Math.min(hunk.lines.length - 1, index + 2);
+        const snippet = hunk.lines.slice(start, end + 1).join("\n");
+        slices.push(`File: ${filename}\n${snippet}`);
+      }
+    }
   }
 
-  const heuristicFindings = heuristicReview(request.code);
-  const context = buildReviewContext(request.language, request.repository, request.context);
+  if (slices.length === 0) {
+    return rawDiff;
+  }
 
-  let aiReview: ReviewResponse = {
-    summary: "AI review unavailable.",
-    findings: []
+  return slices.join("\n\n");
+}
+
+function isLikelyDiff(content: string): boolean {
+  return content.includes("diff --git") || content.includes("@@") || content.includes("\n+");
+}
+
+function buildCacheKey(code: string, context?: string): string {
+  return `review:${createHash("sha256").update(`${code}${context ?? ""}`).digest("hex")}`;
+}
+
+function computeRisk(issues: ReviewIssue[]): { risk: number; verdict: ReviewResponse["verdict"] } {
+  const riskScore =
+    issues.filter((issue) => issue.severity === "high").length * 3 +
+    issues.filter((issue) => issue.severity === "medium").length * 2 +
+    issues.filter((issue) => issue.severity === "low").length * 1;
+
+  const verdict = riskScore >= 6 ? "Needs changes" : riskScore >= 3 ? "Review suggested" : "Looks good";
+
+  return {
+    risk: riskScore,
+    verdict
   };
+}
+
+async function performReview(request: ReviewRequest, options: ReviewOptions): Promise<ReviewResponse> {
+  const { logger, source = "http", onChunk } = options;
+  logger?.info({ event: "review_start", source });
+
+  const cacheKey = buildCacheKey(request.code, request.context);
+  if (redis) {
+    const cachedValue = await redis.get(cacheKey);
+    if (cachedValue) {
+      return JSON.parse(cachedValue) as ReviewResponse;
+    }
+  }
+
+  const reviewInput = isLikelyDiff(request.code) ? extractAddedLinesWithContext(request.code) : request.code;
+  const llmStart = Date.now();
 
   try {
-    aiReview = await callReviewModel({
-      ...request,
-      context
-    });
-  } catch {
-    aiReview = {
-      summary: "AI review failed, so heuristic checks were returned instead.",
-      findings: []
+    const rawModelResponse = onChunk
+      ? await createReviewCompletionStream({ ...request, code: reviewInput }, onChunk)
+      : await createReviewCompletion({ ...request, code: reviewInput });
+
+    logger?.info({ event: "llm_done", source, latencyMs: Date.now() - llmStart });
+
+    const llmIssues = parseIssuesFromModel(rawModelResponse);
+    const astIssues = runAstRules(request.code, request.sourcePath);
+    const issues = dedupeIssues([...astIssues, ...llmIssues]);
+    const risk = computeRisk(issues);
+
+    const response: ReviewResponse = {
+      risk: risk.risk,
+      verdict: risk.verdict,
+      issues
     };
+
+    if (redis) {
+      await redis.set(cacheKey, JSON.stringify(response), "EX", 3600);
+    }
+
+    return response;
+  } catch (error) {
+    logger?.error({
+      event: "review_error",
+      source,
+      error: error instanceof Error ? error.message : "Unknown review error"
+    });
+
+    throw error;
   }
+}
 
-  const findings = mergeFindings(heuristicFindings, aiReview.findings);
+export async function reviewCode(request: ReviewRequest, options: ReviewOptions = {}): Promise<ReviewResponse> {
+  return performReview(request, options);
+}
 
-  const response: ReviewResponse = {
-    summary: aiReview.summary || (findings.length > 0 ? "Review completed with actionable feedback." : "No issues found in the first pass."),
-    findings
-  };
-
-  void writeCachedReview(request.code, request.language, request.context, response);
-
-  return response;
+export async function reviewCodeWithStream(
+  request: ReviewRequest,
+  onChunk: (chunk: string) => void,
+  options: Omit<ReviewOptions, "onChunk"> = {}
+): Promise<ReviewResponse> {
+  return performReview(request, {
+    ...options,
+    onChunk
+  });
 }

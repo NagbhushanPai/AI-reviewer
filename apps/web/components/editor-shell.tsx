@@ -11,6 +11,7 @@ export function EditorShell() {
   const language = useUiStore((state) => state.language);
   const context = useUiStore((state) => state.context);
   const latestReview = useUiStore((state) => state.latestReview);
+  const streamedResponse = useUiStore((state) => state.streamedResponse);
   const status = useUiStore((state) => state.status);
   const setCode = useUiStore((state) => state.setCode);
   const setLanguage = useUiStore((state) => state.setLanguage);
@@ -104,25 +105,29 @@ export function EditorShell() {
           <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
             <p className="text-xs uppercase tracking-[0.25em] text-[var(--muted)]">Summary</p>
             <p className="mt-3 text-sm leading-6 text-slate-100">
-              {latestReview?.summary ?? "Run a review to see findings and AI feedback here."}
+              {status === "reviewing"
+                ? streamedResponse || "Streaming analysis..."
+                : latestReview
+                  ? `${latestReview.verdict} (risk ${latestReview.risk})`
+                  : "Run a review to see findings and AI feedback here."}
             </p>
           </div>
 
           <div className="space-y-3">
-            {(latestReview?.findings ?? []).length === 0 ? (
+            {(latestReview?.issues ?? []).length === 0 ? (
               <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.03] p-4 text-sm text-[var(--muted)]">
                 No findings yet. The first review will populate this panel.
               </div>
             ) : (
-              latestReview?.findings.map((finding) => (
-                <article key={finding.id} className="rounded-3xl border border-white/10 bg-white/5 p-4">
+              latestReview?.issues.map((finding, index) => (
+                <article key={`${finding.issue}-${index}`} className="rounded-3xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${finding.severity === "error" ? "bg-[#ff7b8f]/10 text-[#ff7b8f]" : finding.severity === "warning" ? "bg-[#ffd36e]/10 text-[#ffd36e]" : "bg-[#71e4ff]/10 text-[#71e4ff]"}`}>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${finding.severity === "high" ? "bg-[#ff7b8f]/10 text-[#ff7b8f]" : finding.severity === "medium" ? "bg-[#ffd36e]/10 text-[#ffd36e]" : "bg-[#71e4ff]/10 text-[#71e4ff]"}`}>
                       {finding.severity}
                     </span>
                     {finding.line ? <span className="text-xs text-[var(--muted)]">Line {finding.line}</span> : null}
                   </div>
-                  <p className="mt-3 text-sm text-white">{finding.message}</p>
+                  <p className="mt-3 text-sm text-white">{finding.issue}</p>
                   {finding.suggestion ? <p className="mt-2 text-sm text-[var(--muted)]">{finding.suggestion}</p> : null}
                 </article>
               ))

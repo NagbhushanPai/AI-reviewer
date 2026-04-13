@@ -5,7 +5,10 @@ import { reviewCode } from "./review.service.js";
 export async function reviewRoutes(app: FastifyInstance): Promise<void> {
   app.post("/review", async (request, reply) => {
     const payload = reviewRequestSchema.parse(request.body);
-    const result = await reviewCode(payload);
+    const result = await reviewCode(payload, {
+      source: "http",
+      logger: app.log
+    });
 
     reply.header("cache-control", "no-store");
     return reply.send(result);

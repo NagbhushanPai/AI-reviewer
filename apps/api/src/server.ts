@@ -12,7 +12,7 @@ async function start(): Promise<void> {
     }
   });
 
-  registerSocketHandlers(io);
+  registerSocketHandlers(io, app.log);
 
   try {
     await app.listen({

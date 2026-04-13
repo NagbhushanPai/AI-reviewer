@@ -1,63 +1,113 @@
 import OpenAI from "openai";
-import type { ReviewFinding, ReviewRequest, ReviewResponse } from "@ai-review/types";
-import { safeJsonParse, withRetry } from "@ai-review/utils";
+import type { ReviewRequest } from "@ai-review/types";
 import { env } from "./env.js";
 
-const client = env.OPENAI_API_KEY ? new OpenAI({ apiKey: env.OPENAI_API_KEY }) : null;
+const client = env.OPENAI_API_KEY
+  ? new OpenAI({
+      apiKey: env.OPENAI_API_KEY,
+      timeout: 8000
+    })
+  : null;
 
-function normalizeFindings(findings: Array<Partial<ReviewFinding>>): ReviewFinding[] {
-  return findings
-    .filter((finding) => typeof finding.message === "string" && typeof finding.severity === "string")
-    .map((finding, index) => ({
-      id: finding.id ?? `llm-${index + 1}`,
-      message: finding.message ?? "",
-      severity: finding.severity as ReviewFinding["severity"],
-      line: typeof finding.line === "number" ? finding.line : undefined,
-      suggestion: finding.suggestion,
-      source: "llm"
-    }));
-}
+export const REVIEW_SYSTEM_PROMPT = `You are a senior software engineer performing a code review.
 
-export async function callReviewModel(input: ReviewRequest): Promise<ReviewResponse> {
-  if (!client) {
-    return {
-      summary: "OpenAI is not configured, so only heuristic checks were used.",
-      findings: []
-    };
+Rules:
+- Be concise
+- Focus on bugs, performance, and security issues
+- Avoid generic or stylistic advice
+
+Return ONLY a JSON array, no markdown, no preamble:
+[
+  {
+    "issue": "string",
+    "severity": "low" | "medium" | "high",
+    "suggestion": "string",
+    "line": number | null
+  }
+]`;
+
+const TIMEOUT_FALLBACK =
+  '[{"issue":"Review timed out","severity":"low","suggestion":"Try again","line":null}]';
+
+function isTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
   }
 
-  const completion = await withRetry(
-    () =>
-      client.chat.completions.create({
-        model: env.OPENAI_MODEL,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a strict senior engineer reviewing a single code snippet. Return valid JSON with keys summary and findings. Each finding should include message, severity, line, and suggestion when relevant."
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              language: input.language ?? "unknown",
-              repository: input.repository ?? null,
-              context: input.context ?? null,
-              code: input.code
-            })
-          }
-        ]
-      }),
-    3,
-    400
-  );
+  const message = error.message.toLowerCase();
+  return message.includes("timeout") || message.includes("timed out");
+}
 
-  const content = completion.choices[0]?.message?.content ?? "{}";
-  const parsed = safeJsonParse<Partial<ReviewResponse>>(content, {});
+function buildUserPrompt(input: ReviewRequest): string {
+  return JSON.stringify({
+    language: input.language ?? "unknown",
+    repository: input.repository ?? null,
+    context: input.context ?? null,
+    code: input.code
+  });
+}
 
-  return {
-    summary: parsed.summary ?? "AI review completed.",
-    findings: Array.isArray(parsed.findings) ? normalizeFindings(parsed.findings as Array<Partial<ReviewFinding>>) : []
-  };
+export async function createReviewCompletion(input: ReviewRequest): Promise<string> {
+  if (!client) {
+    return "[]";
+  }
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: env.OPENAI_MODEL,
+      temperature: 0.1,
+      messages: [
+        { role: "system", content: REVIEW_SYSTEM_PROMPT },
+        { role: "user", content: buildUserPrompt(input) }
+      ]
+    });
+
+    return completion.choices[0]?.message?.content ?? "[]";
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      return TIMEOUT_FALLBACK;
+    }
+
+    throw error;
+  }
+}
+
+export async function createReviewCompletionStream(
+  input: ReviewRequest,
+  onChunk: (chunk: string) => void
+): Promise<string> {
+  if (!client) {
+    return "[]";
+  }
+
+  try {
+    const stream = await client.chat.completions.create({
+      model: env.OPENAI_MODEL,
+      temperature: 0.1,
+      stream: true,
+      messages: [
+        { role: "system", content: REVIEW_SYSTEM_PROMPT },
+        { role: "user", content: buildUserPrompt(input) }
+      ]
+    });
+
+    let content = "";
+
+    for await (const chunk of stream) {
+      const piece = chunk.choices[0]?.delta?.content ?? "";
+      if (piece) {
+        content += piece;
+        onChunk(piece);
+      }
+    }
+
+    return content || "[]";
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      onChunk(TIMEOUT_FALLBACK);
+      return TIMEOUT_FALLBACK;
+    }
+
+    throw error;
+  }
 }

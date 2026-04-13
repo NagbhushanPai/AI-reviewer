@@ -2,7 +2,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
 import { env } from "./lib/env.js";
-import { githubRoutes } from "./modules/github/github.routes.js";
+import { webhookRoutes } from "./github/webhook.routes.js";
 import { reviewRoutes } from "./modules/review/review.routes.js";
 import { registerCorePlugins } from "./plugins/index.js";
 
@@ -19,7 +19,7 @@ export function buildApp() {
   });
 
   app.register(rateLimit, {
-    max: 120,
+    max: 100,
     timeWindow: "1 minute"
   });
 
@@ -29,7 +29,7 @@ export function buildApp() {
   }));
 
   app.register(reviewRoutes, { prefix: "/api/v1" });
-  app.register(githubRoutes, { prefix: "/api/v1" });
+  app.register(webhookRoutes, { prefix: "/api/v1" });
 
   return app;
 }
