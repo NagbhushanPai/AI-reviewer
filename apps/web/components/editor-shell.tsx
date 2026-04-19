@@ -6,6 +6,18 @@ import { getSocket } from "../lib/socket";
 import { useUiStore } from "../store/ui";
 import { useReviewSubmission } from "../hooks/use-review-submission";
 
+const MAX_CODE_LENGTH = 200_000; // ~200 KB of characters
+const SUPPORTED_LANGUAGES = [
+  { value: "typescript", label: "TypeScript" },
+  { value: "javascript", label: "JavaScript" },
+  { value: "tsx", label: "TSX" },
+  { value: "jsx", label: "JSX" },
+  { value: "python", label: "Python" },
+  { value: "go", label: "Go" },
+  { value: "rust", label: "Rust" },
+  { value: "java", label: "Java" }
+];
+
 export function EditorShell() {
   const code = useUiStore((state) => state.code);
   const language = useUiStore((state) => state.language);
@@ -18,6 +30,10 @@ export function EditorShell() {
   const setContext = useUiStore((state) => state.setContext);
   const reviewMutation = useReviewSubmission();
 
+  const isOverLimit = code.length > MAX_CODE_LENGTH;
+  const isReviewing = status === "reviewing";
+  const canSubmit = !isReviewing && !isOverLimit && code.trim().length > 0;
+
   useEffect(() => {
     const socket = getSocket();
     socket.connect();
@@ -26,6 +42,13 @@ export function EditorShell() {
       socket.disconnect();
     };
   }, []);
+
+  function reviewSummary(): string {
+    if (status === "reviewing") return streamedResponse || "Streaming analysis...";
+    if (status === "error") return "Review failed. Please try again.";
+    if (latestReview) return `${latestReview.verdict} · risk score ${latestReview.risk}`;
+    return "Run a review to see findings and AI feedback here.";
+  }
 
   return (
     <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
@@ -39,9 +62,10 @@ export function EditorShell() {
             type="button"
             onClick={() => reviewMutation.mutate()}
             className="rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-slate-950 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={status === "reviewing"}
+            disabled={!canSubmit}
+            title={isOverLimit ? "Code exceeds the 200 000-character limit" : undefined}
           >
-            {status === "reviewing" ? "Reviewing..." : "Run review"}
+            {isReviewing ? "Reviewing..." : "Run review"}
           </button>
         </div>
 
@@ -53,9 +77,11 @@ export function EditorShell() {
               onChange={(event) => setLanguage(event.target.value)}
               className="rounded-2xl border border-white/10 bg-[var(--surface-2)] px-4 py-3 text-sm text-white outline-none"
             >
-              <option value="typescript">TypeScript</option>
-              <option value="javascript">JavaScript</option>
-              <option value="tsx">TSX</option>
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.value} value={lang.value}>
+                  {lang.label}
+                </option>
+              ))}
             </select>
           </label>
 
@@ -88,6 +114,13 @@ export function EditorShell() {
             }}
           />
         </div>
+
+        {isOverLimit && (
+          <p className="border-t border-white/10 px-5 py-3 text-xs text-[#ff7b8f]">
+            Code exceeds the {MAX_CODE_LENGTH.toLocaleString()}-character limit (
+            {code.length.toLocaleString()} chars). Trim the input to run a review.
+          </p>
+        )}
       </div>
 
       <aside className="rounded-[28px] border border-white/10 bg-[rgba(15,22,40,0.92)] p-5 shadow-glow backdrop-blur-xl">
@@ -96,21 +129,27 @@ export function EditorShell() {
             <p className="text-sm uppercase tracking-[0.28em] text-[var(--muted)]">Review</p>
             <h2 className="mt-1 text-lg font-semibold text-white">Realtime feedback</h2>
           </div>
-          <span className="rounded-full border border-white/10 px-3 py-1 text-xs text-[var(--muted)]">
+          <span
+            className={`rounded-full border px-3 py-1 text-xs ${
+              status === "error"
+                ? "border-[#ff7b8f]/30 text-[#ff7b8f]"
+                : status === "ready"
+                  ? "border-[#71e4ff]/30 text-[#71e4ff]"
+                  : "border-white/10 text-[var(--muted)]"
+            }`}
+          >
             {status.toUpperCase()}
           </span>
         </div>
 
         <div className="mt-5 space-y-4">
-          <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
+          <div
+            className={`rounded-3xl border p-4 ${
+              status === "error" ? "border-[#ff7b8f]/20 bg-[#ff7b8f]/5" : "border-white/10 bg-white/5"
+            }`}
+          >
             <p className="text-xs uppercase tracking-[0.25em] text-[var(--muted)]">Summary</p>
-            <p className="mt-3 text-sm leading-6 text-slate-100">
-              {status === "reviewing"
-                ? streamedResponse || "Streaming analysis..."
-                : latestReview
-                  ? `${latestReview.verdict} (risk ${latestReview.risk})`
-                  : "Run a review to see findings and AI feedback here."}
-            </p>
+            <p className="mt-3 text-sm leading-6 text-slate-100">{reviewSummary()}</p>
           </div>
 
           <div className="space-y-3">
@@ -122,7 +161,15 @@ export function EditorShell() {
               latestReview?.issues.map((finding, index) => (
                 <article key={`${finding.issue}-${index}`} className="rounded-3xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${finding.severity === "high" ? "bg-[#ff7b8f]/10 text-[#ff7b8f]" : finding.severity === "medium" ? "bg-[#ffd36e]/10 text-[#ffd36e]" : "bg-[#71e4ff]/10 text-[#71e4ff]"}`}>
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                        finding.severity === "high"
+                          ? "bg-[#ff7b8f]/10 text-[#ff7b8f]"
+                          : finding.severity === "medium"
+                            ? "bg-[#ffd36e]/10 text-[#ffd36e]"
+                            : "bg-[#71e4ff]/10 text-[#71e4ff]"
+                      }`}
+                    >
                       {finding.severity}
                     </span>
                     {finding.line ? <span className="text-xs text-[var(--muted)]">Line {finding.line}</span> : null}

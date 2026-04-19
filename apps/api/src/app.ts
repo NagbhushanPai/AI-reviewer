@@ -8,7 +8,8 @@ import { registerCorePlugins } from "./plugins/index.js";
 
 export function buildApp() {
   const app = Fastify({
-    logger: true
+    logger: true,
+    bodyLimit: 256 * 1024 // 256 KB – prevents oversized review payloads
   });
 
   registerCorePlugins(app);

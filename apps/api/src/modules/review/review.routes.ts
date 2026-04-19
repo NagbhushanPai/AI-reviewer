@@ -7,7 +7,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     const payload = reviewRequestSchema.parse(request.body);
     const result = await reviewCode(payload, {
       source: "http",
-      logger: app.log
+      logger: request.log
     });
 
     reply.header("cache-control", "no-store");
